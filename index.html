@@ -29,7 +29,10 @@ button:active{transform:scale(.97)}
 <div id="root"></div>
 <script>
 const {useState,useRef,useEffect}=React;
-const SK='mono-bank-v1';let sv={};try{sv=JSON.parse(localStorage.getItem(SK))||{};}catch(e){sv={};}
+const SK='mono-bank-v1';let sv={};
+const loadSave=()=>{try{const a=localStorage.getItem(SK);if(a)return JSON.parse(a);}catch(e){}try{const a=sessionStorage.getItem(SK);if(a)return JSON.parse(a);}catch(e){}try{if(window.name.indexOf(SK+'=')===0)return JSON.parse(window.name.slice(SK.length+1));}catch(e){}return {};};
+const writeSave=d=>{const s=d?JSON.stringify(d):'';try{d?localStorage.setItem(SK,s):localStorage.removeItem(SK);}catch(e){}try{d?sessionStorage.setItem(SK,s):sessionStorage.removeItem(SK);}catch(e){}try{window.name=d?SK+'='+s:'';}catch(e){}};
+sv=loadSave()||{};
 const html=htm.bind(React.createElement);
 
 /* ---------- SOUND ENGINE ---------- */
@@ -166,7 +169,7 @@ function App(){
   const [selA,setSelA]=useState('');const [selB,setSelB]=useState('');const [selP,setSelP]=useState('');
   const [debt,setDebt]=useState(null);
   const [over,setOver]=useState(null);
-  useEffect(()=>{try{if(over||!started)localStorage.removeItem(SK);else localStorage.setItem(SK,JSON.stringify({started,count,setup,players,props,turn,last}));}catch(e){}},[started,count,setup,players,props,turn,last,over]);
+  useEffect(()=>{writeSave(over||!started?null:{started,count,setup,players,props,turn,last});},[started,count,setup,players,props,turn,last,over]);
 
   const me=players[turn]||{};
   const say=t=>setMsg(t);
