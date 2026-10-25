@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Monopoly Banking Companion</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/htm@3.1.1/dist/htm.umd.js"></script>
+<style>
+:root{color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--felt:#0a1f1a;--panel:#12302a;--panel2:#0e2822;--line:#24493f;--brass:#e0b04a;--ink:#e8f1ec;--mute:#8fb0a4}
+html,body{height:100%}
+body{margin:0;background:var(--felt);color:var(--ink);font-family:'Bricolage Grotesque',system-ui,sans-serif;user-select:none;-webkit-tap-highlight-color:transparent}
+.pnl{background:var(--panel);border:1px solid var(--line);border-radius:18px}
+.pnl2{background:var(--panel2);border:1px solid var(--line);border-radius:14px}
+.brass{background:var(--brass);color:#1a1405}
+.mute{color:var(--mute)}
+.note{background:linear-gradient(135deg,#1c4a3b,#12302a);border:1px solid #2f6a57;border-radius:20px}
+@keyframes up{from{transform:translateY(24px);opacity:0}to{transform:none;opacity:1}}
+.sheet{animation:up .22s ease}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+button:active{transform:scale(.97)}
+@media (prefers-reduced-motion:reduce){.sheet{animation:none}button:active{transform:none}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const {useState,useRef}=React;
+const html=htm.bind(React.createElement);
+
+/* ---------- SOUND ENGINE ---------- */
+let AC=null,muted=false;
+const actx=()=>{AC=AC||new(window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume();return AC;};
+function tone(c,o){
+  const t=c.currentTime+(o.at||0),osc=c.createOscillator(),g=c.createGain();
+  osc.type=o.type||'sine';osc.frequency.setValueAtTime(o.f,t);
+  (o.ramp||[]).forEach(([f,d])=>osc.frequency.exponentialRampToValueAtTime(f,t+d));
+  let n=osc;
+  if(o.lp){const fl=c.createBiquadFilter();fl.type='lowpass';fl.frequency.setValueAtTime(o.lp,t);(o.lpRamp||[]).forEach(([f,d])=>fl.frequency.exponentialRampToValueAtTime(f,t+d));osc.connect(fl);n=fl;}
+  g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(o.v||.2,t+(o.a||.015));g.gain.exponentialRampToValueAtTime(.0001,t+o.d);
+  n.connect(g);g.connect(c.destination);osc.start(t);osc.stop(t+o.d+.05);
+  if(o.vib){const l=c.createOscillator(),lg=c.createGain();l.frequency.value=o.vib[0];lg.gain.value=o.vib[1];l.connect(lg);lg.connect(osc.frequency);l.start(t);l.stop(t+o.d+.05);}
+}
+function noise(c,o){
+  const t=c.currentTime+(o.at||0),len=c.sampleRate*o.d,buf=c.createBuffer(1,len,c.sampleRate),data=buf.getChannelData(0);
+  for(let i=0;i<len;i++)data[i]=Math.random()*2-1;
+  const s=c.createBufferSource();s.buffer=buf;
+  const f=c.createBiquadFilter();f.type=o.ft||'bandpass';f.frequency.setValueAtTime(o.f,t);(o.ramp||[]).forEach(([x,d])=>f.frequency.exponentialRampToValueAtTime(x,t+d));f.Q.value=o.q||1;
+  const g=c.createGain();g.gain.setValueAtTime(o.am?0:o.v,t);
+  if(o.am){const l=c.createOscillator(),lg=c.createGain();l.type='sawtooth';l.frequency.value=o.am;lg.gain.value=o.v;l.connect(lg);lg.connect(g.gain);l.start(t);l.stop(t+o.d);}
+  g.gain.setTargetAtTime(0,t+o.d*.8,o.d*.08);
+  s.connect(f);f.connect(g);g.connect(c.destination);s.start(t);
+}
+const seq=(c,type,fs,step,d,v)=>fs.forEach((f,i)=>tone(c,{type,f,at:i*step,d,v}));
+const SOUNDS={
+  // Token sounds
+  token_racecar:c=>{ // car horn: two quick honks, dual-tone
+    [0,.32].forEach(at=>[415,523].forEach(f=>{
+      tone(c,{type:'square',f,lp:1800,d:.24,at,v:.1,a:.01});
+      tone(c,{type:'sawtooth',f:f*2,lp:2400,d:.24,at,v:.04,a:.01});
+    }));
+  },
+  token_battleship:c=>{ // steam boat whistle: airy, rising then settling
+    [392,494,587].forEach((f,i)=>{
+      tone(c,{type:'triangle',f:f*.96,ramp:[[f,.12]],vib:[5.5,4],d:1.5,a:.1,v:.13-i*.02});
+      tone(c,{type:'sine',f:f*2,vib:[5.5,6],d:1.4,a:.12,v:.03});
+    });
+    noise(c,{f:2200,q:1.2,d:1.4,v:.05});
+  },
+  token_helicopter:c=>{ // rotor chop with turbine whine
+    noise(c,{f:260,q:2.5,d:1.5,am:15,v:.7});
+    tone(c,{type:'sawtooth',f:48,d:1.5,lp:200,v:.2,a:.05});
+    tone(c,{type:'sine',f:900,ramp:[[1500,1.4]],d:1.5,v:.025,a:.3});
+  },
+  token_plane:c=>{ // propeller plane fly-by: engine drone with doppler sweep
+    tone(c,{type:'sawtooth',f:95,ramp:[[150,.9],[85,2]],lp:500,lpRamp:[[1200,.9],[350,2]],vib:[38,9],d:2.1,a:.3,v:.2});
+    tone(c,{type:'square',f:48,ramp:[[75,.9],[42,2]],lp:300,d:2.1,a:.3,v:.12});
+    noise(c,{f:600,ramp:[[2200,.9],[500,2]],q:.7,d:2.1,am:36,v:.22});
+  },
+  // System sounds
+  tap:c=>tone(c,{type:'square',f:1200,ramp:[[800,.05]],d:.05,v:.1}),
+  beep:c=>tone(c,{type:'square',f:1200,ramp:[[800,.05]],d:.05,v:.1}),
+  buy:c=>seq(c,'triangle',[1800,2400],.06,.2,.22),
+  rent_boost:c=>seq(c,'sine',[400,600,800,1200],.05,.15,.2),
+  rent_crash:c=>seq(c,'sawtooth',[1200,800,600,300],.05,.15,.15),
+  haunted:c=>tone(c,{type:'sine',f:300,ramp:[[450,.2],[280,.4]],vib:[6,12],d:.5,v:.25}),
+  jail_siren:c=>tone(c,{type:'sawtooth',f:900,ramp:[[400,.25],[900,.5]],lp:2000,d:.55,v:.2}),
+  error_buzz:c=>tone(c,{type:'sawtooth',f:150,d:.3,v:.25}),
+  pass_go:c=>seq(c,'triangle',[523.25,659.25,783.99,1046.5],.07,.25,.22),
+  bid:c=>tone(c,{type:'square',f:600,ramp:[[1200,.08]],d:.08,v:.15}),
+  undo:c=>tone(c,{type:'sawtooth',f:1000,ramp:[[250,.2]],d:.2,v:.18}),
+  fanfare:c=>seq(c,'triangle',[523.25,659.25,783.99,1046.5,1318.5],.11,.4,.22),
+  bankruptcy:c=>seq(c,'sawtooth',[440,392,349.23,293.66],.14,.35,.2)
+};
+SOUNDS.kaching=SOUNDS.buy;
+const play=k=>{if(muted)return;try{SOUNDS[k]&&SOUNDS[k](actx());navigator.vibrate&&navigator.vibrate(k.startsWith('token')?0:12);}catch(e){}};
+
+/* ---------- DATA ---------- */
+const TOKENS=[
+  {id:'racecar',name:'Car',icon:'🚗',sound:'token_racecar',hue:'#e5484d'},
+  {id:'battleship',name:'Boat',icon:'🚢',sound:'token_battleship',hue:'#3aa3d9'},
+  {id:'helicopter',name:'Helicopter',icon:'🚁',sound:'token_helicopter',hue:'#45b26b'},
+  {id:'plane',name:'Plane',icon:'✈️',sound:'token_plane',hue:'#a47be0'}
+];
+const R=(a,b,c,d,e)=>[a,b,c,d,e];
+const P=(id,side,name,group,price,rents,color)=>({id,side,name,group,price,rents,color});
+const PROPS=[
+  P(1,1,'Old Kent Road','Brown',60,R(70,130,220,370,750),'#8B4513'),P(2,1,'Whitechapel Road','Brown',60,R(70,130,220,370,750),'#8B4513'),
+  P(3,1,'The Angel Islington','Light Blue',100,R(80,140,240,410,800),'#38bdf8'),P(4,1,'Euston Road','Light Blue',100,R(80,140,240,410,800),'#38bdf8'),P(5,1,'Pentonville Road','Light Blue',120,R(100,160,260,440,860),'#38bdf8'),
+  P(6,2,'Pall Mall','Pink',140,R(110,180,290,460,900),'#ec4899'),P(7,2,'Whitehall','Pink',140,R(110,180,290,460,900),'#ec4899'),P(8,2,'Northumberland Avenue','Pink',160,R(130,200,310,490,980),'#ec4899'),
+  P(9,2,'Bow Street','Orange',180,R(140,210,330,520,1000),'#f97316'),P(10,2,'Marlborough Street','Orange',180,R(140,210,330,520,1000),'#f97316'),P(11,2,'Vine Street','Orange',200,R(160,230,350,550,1100),'#f97316'),
+  P(12,3,'Strand','Red',220,R(170,250,380,580,1160),'#ef4444'),P(13,3,'Fleet Street','Red',220,R(170,250,380,580,1160),'#ef4444'),P(14,3,'Trafalgar Square','Red',240,R(190,270,400,610,1200),'#ef4444'),
+  P(15,3,'Leicester Square','Yellow',260,R(200,280,420,640,1300),'#eab308'),P(16,3,'Coventry Street','Yellow',260,R(200,280,420,640,1300),'#eab308'),P(17,3,'Piccadilly','Yellow',280,R(220,300,440,670,1340),'#eab308'),
+  P(18,4,'Regent Street','Green',300,R(230,320,460,700,1400),'#22c55e'),P(19,4,'Oxford Street','Green',300,R(230,320,460,700,1400),'#22c55e'),P(20,4,'Bond Street','Green',320,R(250,340,480,730,1440),'#22c55e'),
+  P(21,4,'Park Lane','Dark Blue',350,R(270,360,510,740,1500),'#1d4ed8'),P(22,4,'Mayfair','Dark Blue',400,R(300,400,560,810,1600),'#1d4ed8')
+];
+const C=(id,title,desc,t)=>({id,title,desc,t});
+const SW='Swap property with another player.',MV='Move to any property space; buy, auction, or raise rent +1.',RS='Target property rent resets to 1.',NB='Target owned property rent +1, neighbors rent -1.',B2='Pick another player, both collect 200 cash.',CU='Target owned property\'s color set rent level +1.';
+const CARDS=[
+  C(1,'Haunted House',SW,'SWAP'),C(2,'In the Money',SW,'SWAP'),C(3,'Stop the presses',MV,'MOVE'),C(4,'Broom Town',MV,'MOVE'),C(5,'Deal of the week',MV,'MOVE'),
+  C(6,'Pong! what a stinker','Select owned property, drop rent -1 for all properties on that side of board.','SIDE_DN'),
+  C(7,'Tornado Alley',RS,'RESET'),C(8,'Rovers Revenge',RS,'RESET'),C(9,'Demolished',RS,'RESET'),C(10,'Its a boy',NB,'NEIGH'),C(11,'House Party',NB,'NEIGH'),
+  C(12,'Pick Your own','Select player and send to Jail.','JAIL'),C(13,'Love is in the air',B2,'BOTH'),C(14,'Wibble wobble',B2,'BOTH'),
+  C(15,'\'Tis the season','Target owned property\'s color set drops rent level -1.','COLOR_DN'),
+  C(16,'Total gridlock','All players move directly to Free Parking (except jailed players).','PARK'),
+  C(17,'What a ride','Target owned property, rent +1 for all owned properties on that side of board.','SIDE_UP'),
+  C(18,'On the map',CU,'COLOR_UP'),C(19,'Crime down',CU,'COLOR_UP'),C(20,'Star gazing',CU,'COLOR_UP'),
+  C(21,'On the run','Active player gets Level 1 rent immunity for next 2 rent payments.','IMMUNE'),
+  C(22,'Highway tax','Active player pays 50 per owned property to Bank.','TAX'),
+  C(23,'Grand designs','Target owned property rent level jumps to 5 (Max).','MAX')
+];
+const NEEDS_PROP=['SWAP','MOVE','SIDE_DN','RESET','NEIGH','COLOR_DN','SIDE_UP','COLOR_UP','MAX'];
+const m=n=>'A'+n.toLocaleString();
+
+/* ---------- UI PIECES ---------- */
+const Sheet=({children,onClose,tone})=>html`
+  <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style=${{background:'rgba(4,12,10,.82)'}} onClick=${onClose}>
+    <div className="sheet pnl w-full max-w-md max-h-[92%] overflow-y-auto p-5 rounded-b-none sm:rounded-b-[18px]" style=${{borderColor:tone||'var(--line)'}} onClick=${e=>e.stopPropagation()}>${children}</div>
+  </div>`;
+const Pick=({label,value,onChange,children})=>html`
+  <label className="block mb-3"><span className="text-sm mute block mb-1">${label}</span>
+  <select value=${value||''} onChange=${e=>onChange(e.target.value)} className="w-full rounded-xl p-3 text-base" style=${{background:'var(--panel2)',border:'1px solid var(--line)',color:'var(--ink)'}}>
+  <option value="">Choose…</option>${children}</select></label>`;
+
+function App(){
+  const [started,setStarted]=useState(false);
+  const [count,setCount]=useState(4);
+  const [setup,setSetup]=useState(TOKENS.map((t,i)=>({id:i+1,name:'Player '+(i+1),tokenId:t.id})));
+  const [mute,setMute]=useState(false);
+  const [players,setPlayers]=useState([]);
+  const [props,setProps]=useState([]);
+  const [turn,setTurn]=useState(0);
+  const [tab,setTab]=useState('players');
+  const [last,setLast]=useState(null);
+  const [msg,setMsg]=useState('');
+  const [auc,setAuc]=useState(null);
+  const [bid,setBid]=useState(20);
+  const [timer,setTimer]=useState(15);
+  const [leader,setLeader]=useState(null);
+  const tRef=useRef(null);
+  const [ev,setEv]=useState(null);
+  const [selA,setSelA]=useState('');const [selB,setSelB]=useState('');const [selP,setSelP]=useState('');
+  const [debt,setDebt]=useState(null);
+  const [over,setOver]=useState(null);
+
+  const me=players[turn]||{};
+  const say=t=>setMsg(t);
+  const snap=()=>({players,props});
+  const log=(d,s)=>setLast({d,s:JSON.parse(JSON.stringify(s))});
+  const toggleMute=()=>{muted=!mute;setMute(!mute);if(!muted)play('tap');};
+
+  const start=()=>{
+    play('kaching');
+    const ps=setup.slice(0,count).map(p=>{const t=TOKENS.find(x=>x.id===p.tokenId);return{id:p.id,name:p.name||'Player '+p.id,token:t,cash:1500,inJail:false,immune:0};});
+    setPlayers(ps);setProps(PROPS.map(p=>({...p,owner:null,lvl:1})));setTurn(0);setLast(null);setStarted(true);setOver(null);say('Game started. '+ps[0].name+' goes first.');
+  };
+  const next=()=>{play('tap');const i=(turn+1)%players.length;setTurn(i);say(players[i].name+'’s turn');};
+  const undo=()=>{if(!last)return;play('undo');setPlayers(last.s.players);setProps(last.s.props);say('Undone: '+last.d);setLast(null);};
+  const pay=(p,amt,label,sound)=>{
+    if(p.cash<amt){askDebt(p,null,amt);return;}
+    const s=snap();play(sound);setPlayers(pl=>pl.map(x=>x.id===p.id?{...x,cash:x.cash-amt,inJail:label==='jail'?false:x.inJail}:x));
+    say(p.name+' paid '+m(amt)+(label==='jail'?' to leave Jail':' for a location move'));log(p.name+' paid '+m(amt),s);
+  };
+  const passGo=p=>{const s=snap();play('pass_go');setPlayers(pl=>pl.map(x=>x.id===p.id?{...x,cash:x.cash+200}:x));say(p.name+' collected '+m(200)+' for passing GO');log('GO bonus',s);};
+
+  const askDebt=(debtor,creditor,amount)=>{play('bankruptcy');setDebt({debtor,creditor,amount});};
+
+  const buy=(prop,buyer)=>{
+    if(buyer.cash<prop.price){say('Not enough cash for '+prop.name+'. Starting auction.');openAuction(prop);return;}
+    const s=snap();
+    let up=props.map(p=>p.id===prop.id?{...p,owner:buyer.id,lvl:1}:p);
+    const grp=up.filter(p=>p.group===prop.group),owners=new Set(grp.map(p=>p.owner));
+    let bonus='';
+    if(!owners.has(null)){const j=owners.size===1?2:1;up=up.map(p=>p.group===prop.group?{...p,lvl:Math.min(5,p.lvl+j)}:p);bonus=' Color set complete: rent up '+j+(j>1?' levels.':' level.');play('rent_boost');}else play('buy');
+    setPlayers(players.map(p=>p.id===buyer.id?{...p,cash:p.cash-prop.price}:p));setProps(up);
+    say(buyer.name+' bought '+prop.name+' for '+m(prop.price)+'.'+bonus);log(buyer.name+' bought '+prop.name,s);
+  };
+  const land=(prop,v)=>{
+    if(!prop.owner){buy(prop,v);return;}
+    const owner=players.find(p=>p.id===prop.owner);
+    if(owner.id===v.id){play('rent_boost');const n=Math.min(5,prop.lvl+1);setProps(pr=>pr.map(p=>p.id===prop.id?{...p,lvl:n}:p));say(v.name+' landed on their own '+prop.name+': rent level '+n+'.');return;}
+    const imm=v.immune>0,rent=imm?prop.rents[0]:prop.rents[prop.lvl-1];
+    if(v.cash<rent){askDebt(v,owner,rent);return;}
+    const s=snap();play('buy');
+    setPlayers(players.map(p=>p.id===v.id?{...p,cash:p.cash-rent,immune:imm?p.immune-1:p.immune}:p.id===owner.id?{...p,cash:p.cash+rent}:p));
+    if(!imm){const n=Math.min(5,prop.lvl+1);setProps(props.map(p=>p.id===prop.id?{...p,lvl:n}:p));say(v.name+' paid '+m(rent)+' rent to '+owner.name+'. '+prop.name+' is now level '+n+'.');}
+    else say(v.name+' used immunity and paid level 1 rent ('+m(rent)+'). '+(v.immune-1)+' left.');
+    log(v.name+' paid rent on '+prop.name,s);
+  };
+
+  /* auction */
+  const openAuction=prop=>{
+    play('bid');setAuc(prop);setBid(20);setTimer(15);setLeader(null);
+    clearInterval(tRef.current);
+    tRef.current=setInterval(()=>setTimer(t=>{if(t<=1){clearInterval(tRef.current);return 0;}return t-1;}),1000);
+  };
+  const placeBid=p=>{play('bid');setLeader(p);setBid(b=>b+20);setTimer(10);
+    clearInterval(tRef.current);tRef.current=setInterval(()=>setTimer(t=>{if(t<=1){clearInterval(tRef.current);return 0;}return t-1;}),1000);};
+  const closeAuction=()=>{clearInterval(tRef.current);setAuc(null);};
+  const finishAuction=()=>{
+    if(!leader){say('Auction for '+auc.name+' ended with no bids.');closeAuction();return;}
+    const price=bid-20;
+    if(leader.cash<price){say(leader.name+' can’t afford '+m(price)+'.');return;}
+    const s=snap();play('buy');
+    setPlayers(players.map(p=>p.id===leader.id?{...p,cash:p.cash-price}:p));
+    setProps(props.map(p=>p.id===auc.id?{...p,owner:leader.id,lvl:1}:p));
+    say(leader.name+' won '+auc.name+' for '+m(price)+'.');log('Auction: '+auc.name,s);closeAuction();
+  };
+
+  /* event cards */
+  const openCard=c=>{play(c.t==='SWAP'?'haunted':'tap');setEv(c);setSelA('');setSelB('');setSelP('');};
+  const runCard=()=>{
+    const c=ev,s=snap(),A=props.find(p=>p.id===+selA),B=props.find(p=>p.id===+selB),T=players.find(p=>p.id===+selP);
+    const needP=NEEDS_PROP.includes(c.t),needT=c.t==='JAIL'||c.t==='BOTH';
+    if((needP&&!A)||(c.t==='SWAP'&&!B)||(needT&&!T)){play('error_buzz');return;}
+    const setL=(fn,snd,t)=>{setProps(props.map(fn));play(snd);say(t);};
+    switch(c.t){
+      case'SWAP':setProps(props.map(p=>p.id===A.id?{...p,owner:B.owner}:p.id===B.id?{...p,owner:A.owner}:p));play('haunted');say('Swapped '+A.name+' and '+B.name+'.');break;
+      case'MOVE':setEv(null);say(me.name+' moved to '+A.name+'.');land(A,me);return;
+      case'SIDE_DN':setL(p=>p.side===A.side?{...p,lvl:Math.max(1,p.lvl-1)}:p,'rent_crash','Side '+A.side+' rents down 1 level.');break;
+      case'RESET':setL(p=>p.id===A.id?{...p,lvl:1}:p,'rent_crash',A.name+' reset to level 1.');break;
+      case'NEIGH':{const i=props.findIndex(p=>p.id===A.id),Lf=(i-1+props.length)%props.length,Rt=(i+1)%props.length;setL((p,k)=>k===i?{...p,lvl:Math.min(5,p.lvl+1)}:(k===Lf||k===Rt)?{...p,lvl:Math.max(1,p.lvl-1)}:p,'rent_boost',A.name+' +1, neighbors -1.');break;}
+      case'JAIL':setPlayers(players.map(p=>p.id===T.id?{...p,inJail:true}:p));play('jail_siren');say(T.name+' goes to Jail.');break;
+      case'BOTH':setPlayers(players.map(p=>p.id===me.id||p.id===T.id?{...p,cash:p.cash+200}:p));play('pass_go');say(me.name+' and '+T.name+' each collect '+m(200)+'.');break;
+      case'COLOR_DN':setL(p=>p.group===A.group?{...p,lvl:Math.max(1,p.lvl-1)}:p,'rent_crash',A.group+' set rents down 1 level.');break;
+      case'PARK':play('tap');say('All players move to Free Parking.');break;
+      case'SIDE_UP':setL(p=>p.side===A.side&&p.owner?{...p,lvl:Math.min(5,p.lvl+1)}:p,'rent_boost','Owned properties on side '+A.side+' up 1 level.');break;
+      case'COLOR_UP':setL(p=>p.group===A.group?{...p,lvl:Math.min(5,p.lvl+1)}:p,'rent_boost',A.group+' set rents up 1 level.');break;
+      case'IMMUNE':setPlayers(players.map(p=>p.id===me.id?{...p,immune:p.immune+2}:p));play('rent_boost');say(me.name+' has level 1 rent immunity for 2 payments.');break;
+      case'TAX':{const n=props.filter(p=>p.owner===me.id).length,tax=n*50;if(me.cash<tax){setEv(null);askDebt(me,null,tax);return;}setPlayers(players.map(p=>p.id===me.id?{...p,cash:p.cash-tax}:p));play('error_buzz');say(me.name+' paid '+m(tax)+' highway tax for '+n+' properties.');break;}
+      case'MAX':setL(p=>p.id===A.id?{...p,lvl:5}:p,'rent_boost',A.name+' jumped to max rent.');break;
+    }
+    log('Card: '+c.title,s);setEv(null);
+  };
+
+  /* debt */
+  const sell=pr=>{
+    play('kaching');
+    const cash=debt.debtor.cash+pr.price;
+    let pl=players.map(p=>p.id===debt.debtor.id?{...p,cash}:p);
+    setProps(props.map(p=>p.id===pr.id?{...p,owner:null,lvl:1}:p));
+    if(cash>=debt.amount){
+      pl=pl.map(p=>p.id===debt.debtor.id?{...p,cash:p.cash-debt.amount}:debt.creditor&&p.id===debt.creditor.id?{...p,cash:p.cash+debt.amount}:p);
+      setPlayers(pl);setDebt(null);say(debt.debtor.name+' sold '+pr.name+' and settled the debt.');
+    }else{setPlayers(pl);setDebt({...debt,debtor:{...debt.debtor,cash}});say('Sold '+pr.name+'. Still owes '+m(debt.amount-cash)+'.');}
+  };
+  const bankrupt=()=>{
+    const b=debt.debtor;setDebt(null);
+    const res=players.map(p=>{
+      if(p.id===b.id)return{...p,worth:0,top:0,bankrupt:true,propVal:0};
+      const o=props.filter(x=>x.owner===p.id),pv=o.reduce((a,x)=>a+x.price,0);
+      return{...p,propVal:pv,worth:p.cash+pv,top:o.length?Math.max(...o.map(x=>x.price)):0};
+    }).sort((a,b)=>b.worth-a.worth||b.top-a.top);
+    setOver({res,b});play('fanfare');
+  };
+
+  /* ---------- SCREENS ---------- */
+  if(!started)return html`
+    <div className="min-h-full flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <h1 className="text-4xl font-extrabold tracking-tight mb-1" style=${{color:'var(--brass)'}}>Bank of Monopoly</h1>
+        <p className="mute mb-6">Everyone starts with ${m(1500)}. Tap a token to hear it.</p>
+        <div className="grid grid-cols-3 gap-2 mb-5">
+          ${[2,3,4].map(n=>html`<button key=${n} onClick=${()=>{play('tap');setCount(n);}} className=${'py-3 rounded-xl font-semibold border '+(count===n?'brass border-transparent':'pnl2 mute')}>${n} players</button>`)}
+        </div>
+        <div className="space-y-3 mb-6">
+          ${setup.slice(0,count).map((p,i)=>html`
+            <div key=${p.id} className="pnl p-3">
+              <input value=${p.name} onChange=${e=>{const v=e.target.value;setSetup(s=>s.map((x,k)=>k===i?{...x,name:v}:x));}} aria-label=${'Player '+(i+1)+' name'} className="w-full rounded-lg px-3 py-2 mb-3 text-base" style=${{background:'var(--panel2)',border:'1px solid var(--line)',color:'var(--ink)'}}/>
+              <div className="grid grid-cols-4 gap-2">
+                ${TOKENS.map(t=>{const taken=setup.slice(0,count).some((x,k)=>k!==i&&x.tokenId===t.id);return html`
+                  <button key=${t.id} disabled=${taken} aria-label=${t.name} onClick=${()=>{play(t.sound);setSetup(s=>s.map((x,k)=>k===i?{...x,tokenId:t.id}:x));}}
+                    className="py-2 rounded-xl text-2xl border disabled:opacity-25" style=${{borderColor:p.tokenId===t.id?t.hue:'var(--line)',background:p.tokenId===t.id?t.hue+'33':'var(--panel2)'}}>${t.icon}</button>`;})}
+              </div>
+            </div>`)}
+        </div>
+        <button onClick=${start} className="brass w-full py-4 rounded-2xl text-lg font-extrabold">Open the bank</button>
+      </div>
+    </div>`;
+
+  if(over){const w=over.res[0];return html`
+    <div className="min-h-full flex items-center justify-center p-4">
+      <div className="w-full max-w-md pnl p-6 text-center">
+        <div className="text-6xl mb-2">🏆</div>
+        <h1 className="text-3xl font-extrabold" style=${{color:'var(--brass)'}}>${w.name} wins</h1>
+        <p className="mute mb-5">${over.b.name} went bankrupt. Worth is cash plus property value; ties go to the priciest property.</p>
+        <div className="space-y-2 text-left mb-6">
+          ${over.res.map((r,i)=>html`<div key=${r.id} className="pnl2 p-3 flex items-center justify-between">
+            <span className="flex items-center gap-2"><b className="mute w-5">${i+1}</b><span className="text-xl">${r.token.icon}</span><b>${r.name}</b>${r.bankrupt&&html`<span className="text-xs text-red-400">bankrupt</span>`}</span>
+            <span className="text-right"><b className="text-lg">${m(r.worth)}</b><span className="block text-xs mute">top deed ${m(r.top)}</span></span></div>`)}
+        </div>
+        <button onClick=${()=>{play('tap');setStarted(false);setOver(null);}} className="brass w-full py-3 rounded-xl font-extrabold">New game</button>
+      </div></div>`;}
+
+  const owned=id=>props.filter(p=>p.owner===id);
+  const worth=p=>p.cash+owned(p.id).reduce((a,x)=>a+x.price,0);
+  const tabs=[['players','Players','👥'],['deeds','Deeds','🏠'],['cards','Cards','⚡']];
+
+  return html`
+  <div className="max-w-2xl mx-auto min-h-full flex flex-col" style=${{paddingBottom:'84px'}}>
+    <header className="sticky top-0 z-30 px-3 pt-3 pb-2" style=${{background:'linear-gradient(var(--felt) 80%,transparent)'}}>
+      <div className="note p-4">
+        <div className="flex items-start justify-between gap-2">
+          <button onClick=${()=>play(me.token.sound)} className="flex items-center gap-3 text-left" aria-label=${'Play '+me.token.name+' sound'}>
+            <span className="w-14 h-14 rounded-2xl flex items-center justify-center text-3xl" style=${{background:me.token.hue+'33',border:'1px solid '+me.token.hue}}>${me.token.icon}</span>
+            <span><span className="block text-sm mute">On the move</span><span className="block text-xl font-extrabold leading-tight">${me.name}</span></span>
+          </button>
+          <div className="flex gap-2">
+            <button onClick=${toggleMute} aria-label=${mute?'Unmute':'Mute'} className="pnl2 w-10 h-10 text-lg">${mute?'🔇':'🔊'}</button>
+            <button onClick=${next} className="brass px-4 h-10 rounded-xl font-extrabold">Next</button>
+          </div>
+        </div>
+        <div className="mt-3 text-5xl font-extrabold tracking-tight" style=${{color:'var(--brass)'}}>${m(me.cash)}</div>
+        <div className="text-sm mute">Net worth ${m(worth(me))} · ${owned(me.id).length} deeds${me.inJail?' · In Jail':''}${me.immune>0?' · Immune ×'+me.immune:''}</div>
+        <div className="grid grid-cols-3 gap-2 mt-4">
+          <button onClick=${()=>passGo(me)} className="pnl2 py-3 font-semibold">Pass GO<span className="block text-xs text-emerald-300">+${m(200)}</span></button>
+          <button onClick=${()=>pay(me,100,'jail','jail_siren')} className="pnl2 py-3 font-semibold">Leave Jail<span className="block text-xs text-red-300">−${m(100)}</span></button>
+          <button onClick=${()=>pay(me,100,'loc','tap')} className="pnl2 py-3 font-semibold">Teleport<span className="block text-xs text-red-300">−${m(100)}</span></button>
+        </div>
+      </div>
+    </header>
+
+    <main className="px-3 flex-1">
+      ${tab==='players'&&html`<div className="grid gap-3 sm:grid-cols-2">
+        ${players.map((p,i)=>html`<div key=${p.id} onClick=${()=>{setTurn(i);play('tap');}} className="pnl p-4" style=${{borderColor:i===turn?'var(--brass)':'var(--line)'}}>
+          <div className="flex items-center justify-between mb-3">
+            <span className="flex items-center gap-2"><button onClick=${e=>{e.stopPropagation();play(p.token.sound);}} aria-label=${'Play '+p.token.name+' sound'} className="text-2xl w-11 h-11 rounded-xl" style=${{background:p.token.hue+'33'}}>${p.token.icon}</button>
+              <span><b className="block">${p.name}</b><span className="text-xs mute">${p.token.name}${p.inJail?' · In Jail':''}</span></span></span>
+            <span className="text-right"><b className="text-xl block" style=${{color:'var(--brass)'}}>${m(p.cash)}</b><span className="text-xs mute">worth ${m(worth(p))}</span></span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            ${owned(p.id).length===0?html`<span className="text-sm mute">No deeds yet</span>`:owned(p.id).map(d=>html`<span key=${d.id} className="text-xs px-2 py-1 rounded-md pnl2" style=${{borderLeft:'4px solid '+d.color}}>${d.name} <b style=${{color:'var(--brass)'}}>L${d.lvl}</b></span>`)}
+          </div></div>`)}</div>`}
+
+      ${tab==='deeds'&&html`<div className="grid gap-3 sm:grid-cols-2">
+        ${props.map(d=>{const o=players.find(p=>p.id===d.owner);return html`<div key=${d.id} className="pnl overflow-hidden">
+          <div className="px-4 py-2 flex justify-between font-extrabold" style=${{background:d.color,color:['Yellow','Light Blue'].includes(d.group)?'#111':'#fff'}}><span>${d.name}</span><span>${m(d.price)}</span></div>
+          <div className="p-3">
+            <div className="text-xs mute mb-2">Side ${d.side} · ${d.group}</div>
+            <div className="grid grid-cols-5 gap-1 text-center mb-3">
+              ${d.rents.map((r,i)=>html`<div key=${i} className="rounded-lg py-1.5" style=${{background:d.lvl===i+1?'var(--brass)':'var(--panel2)',color:d.lvl===i+1?'#1a1405':'var(--mute)'}}><div className="text-[10px]">L${i+1}</div><div className="text-xs font-bold">${r}</div></div>`)}
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm">${o?html`<span>${o.token.icon} ${o.name}</span>`:html`<span style=${{color:'var(--brass)'}}>Unowned</span>`}</span>
+              <span className="flex gap-2">
+                ${!d.owner&&html`<button onClick=${()=>openAuction(d)} className="pnl2 px-3 py-2 text-sm font-semibold">Auction</button>`}
+                <button onClick=${()=>land(d,me)} className="brass px-3 py-2 rounded-xl text-sm font-extrabold">${d.owner?(d.owner===me.id?'Upgrade':'Pay rent'):'Buy'}</button>
+              </span>
+            </div></div></div>`;})}</div>`}
+
+      ${tab==='cards'&&html`<div className="grid gap-3 sm:grid-cols-2">
+        ${CARDS.map(c=>html`<button key=${c.id} onClick=${()=>openCard(c)} className="pnl p-4 text-left">
+          <b className="block mb-1">⚡ ${c.title}</b><span className="text-sm mute">${c.desc}</span></button>`)}</div>`}
+    </main>
+
+    <div className="fixed left-0 right-0 z-40 px-3" style=${{bottom:'calc(72px + env(safe-area-inset-bottom,0px))'}}>
+      ${msg&&html`<div className="max-w-2xl mx-auto pnl px-3 py-2 flex items-center justify-between gap-3" style=${{background:'#0c2822'}}>
+        <span className="text-sm">${msg}</span>
+        ${last&&html`<button onClick=${undo} className="brass px-3 py-1.5 rounded-lg text-sm font-extrabold whitespace-nowrap">Undo</button>`}</div>`}
+    </div>
+
+    <nav className="fixed bottom-0 left-0 right-0 z-40" style=${{background:'var(--panel)',borderTop:'1px solid var(--line)',paddingBottom:'env(safe-area-inset-bottom,0px)'}}>
+      <div className="max-w-2xl mx-auto grid grid-cols-3">
+        ${tabs.map(([k,l,i])=>html`<button key=${k} onClick=${()=>{play('tap');setTab(k);}} className="py-3 text-sm font-semibold" style=${{color:tab===k?'var(--brass)':'var(--mute)',borderTop:'3px solid '+(tab===k?'var(--brass)':'transparent')}}><span className="block text-lg">${i}</span>${l}</button>`)}
+      </div>
+    </nav>
+
+    ${ev&&html`<${Sheet} onClose=${()=>setEv(null)} tone="var(--brass)">
+      <h2 className="text-2xl font-extrabold">${ev.title}</h2>
+      <p className="mute mb-4">${ev.desc}</p>
+      ${NEEDS_PROP.includes(ev.t)&&html`<${Pick} label=${ev.t==='SWAP'?'First property':'Target property'} value=${selA} onChange=${setSelA}>${props.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.group})</option>`)}<//>`}
+      ${ev.t==='SWAP'&&html`<${Pick} label="Second property" value=${selB} onChange=${setSelB}>${props.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.group})</option>`)}<//>`}
+      ${(ev.t==='JAIL'||ev.t==='BOTH')&&html`<${Pick} label="Player" value=${selP} onChange=${setSelP}>${players.filter(p=>ev.t==='JAIL'||p.id!==me.id).map(p=>html`<option key=${p.id} value=${p.id}>${p.token.icon} ${p.name}</option>`)}<//>`}
+      <div className="grid grid-cols-2 gap-3 mt-4">
+        <button onClick=${()=>setEv(null)} className="pnl2 py-3 font-semibold">Cancel</button>
+        <button onClick=${runCard} className="brass py-3 rounded-xl font-extrabold">Play card</button>
+      </div><//>`}
+
+    ${auc&&html`<${Sheet} onClose=${()=>{}} tone="var(--brass)">
+      <div className="text-center">
+        <p className="mute">Auction</p><h2 className="text-2xl font-extrabold">${auc.name}</h2>
+        <div className="text-6xl font-extrabold my-3" style=${{color:timer<=5?'#ff6b6b':'var(--brass)'}}>${timer}s</div>
+        <div className="pnl2 p-3 mb-4"><div className="text-3xl font-extrabold">${m(leader?bid-20:0)}</div><div className="text-sm mute">${leader?'Top bid by '+leader.name:'No bids yet · list price '+m(auc.price)}</div></div>
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          ${players.map(p=>html`<button key=${p.id} disabled=${p.cash<bid||timer===0} onClick=${()=>placeBid(p)} className="pnl2 py-3 font-semibold disabled:opacity-30">${p.token.icon} ${p.name}<span className="block text-xs mute">bid ${m(bid)}</span></button>`)}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <button onClick=${closeAuction} className="pnl2 py-3 font-semibold">Cancel</button>
+          <button onClick=${finishAuction} className="brass py-3 rounded-xl font-extrabold">${leader?'Sell to '+leader.name:'End auction'}</button>
+        </div></div><//>`}
+
+    ${debt&&html`<${Sheet} onClose=${()=>{}} tone="#e5484d">
+      <h2 className="text-2xl font-extrabold text-center">Not enough cash</h2>
+      <p className="text-center mute mb-4"><b style=${{color:'var(--ink)'}}>${debt.debtor.name}</b> owes <b style=${{color:'#ff8a8a'}}>${m(debt.amount)}</b> ${debt.creditor?'to '+debt.creditor.name:'to the Bank'} and has ${m(debt.debtor.cash)}.</p>
+      <div className="space-y-2 mb-4">
+        ${owned(debt.debtor.id).length===0?html`<p className="text-center mute py-2">No deeds left to sell.</p>`:owned(debt.debtor.id).map(pr=>html`
+          <div key=${pr.id} className="pnl2 p-3 flex items-center justify-between"><span style=${{borderLeft:'4px solid '+pr.color,paddingLeft:'8px'}}><b className="block text-sm">${pr.name}</b><span className="text-xs mute">sells for ${m(pr.price)}</span></span>
+          <button onClick=${()=>sell(pr)} className="brass px-3 py-1.5 rounded-lg text-sm font-extrabold">Sell</button></div>`)}
+      </div>
+      <button onClick=${bankrupt} className="w-full py-3 rounded-xl font-extrabold" style=${{background:'#c53030',color:'#fff'}}>Declare bankruptcy and end game</button><//>`}
+  </div>`;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
+</body>
+</html>
